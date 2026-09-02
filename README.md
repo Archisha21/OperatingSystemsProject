@@ -36,13 +36,7 @@ or:
 5. Automatic Prediction Demo
 6. Exit
 
-## Review 2 demo
 
-Use option 5.
-
-The program launches Notepad as a demonstration process, analyzes it, calculates a future-usage probability, suspends it, waits three seconds, resumes it, and then closes the demo process.
-
-This avoids choosing a random critical Windows process during the presentation.
 
 ## Architecture
 
@@ -54,7 +48,6 @@ Monitor Process
 -> Resume
 -> Evaluate
 
-## Notes
 
 The prediction module currently uses a weighted scoring prototype rather than a trained ML model. The scoring module can later be replaced by an actual ML model.
 
