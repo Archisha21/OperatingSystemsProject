@@ -1,56 +1,30 @@
-# Predictive Process Framework - Windows C Version
+OS PROJECT FINAL - CANDIDATE FIX
 
-## Requirements
+This version keeps the same project files and names and fixes the prediction/candidate behavior.
 
-- Windows 10/11
-- MinGW-w64 GCC
-- VS Code
-- Make
+Prediction decisions:
+- >= 65% : KEEP ACTIVE
+- 40% to < 65% : MONITOR
+- < 40% : CANDIDATE
 
-The project uses Windows APIs and `psapi`.
+An eligible process must also:
+- not be a protected Windows/system process
+- not be the foreground process
+- have at least 60 seconds of tracked background time
+- have CPU usage below 1%
 
-## Compile
+A candidate must remain eligible for 3 consecutive automatic checks before suspension:
+CANDIDATE 1/3 -> CANDIDATE 2/3 -> CANDIDATE 3/3 -> SUSPENDED
 
-Open the VS Code terminal in this folder:
+At the low-CPU long-background point, the prediction may reach about 32%. This is intentionally below the 40% candidate threshold, so it will NOT get stuck at 32%. It proceeds through the three candidate checks and then attempts suspension.
 
-    mingw32-make
+Important Windows, security, terminal, and framework processes are protected before suspension is attempted.
 
-If your installation provides `make` instead:
+Build in MSYS2 UCRT64:
+gcc -Wall -o predictive_framework.exe main.c process.c predict.c control.c data.c -lpsapi
 
-    make
+Run:
+./predictive_framework.exe
 
-## Run
-
-    .\predictive_framework.exe
-
-or:
-
-    mingw32-make run
-
-## Menu
-
-1. Show Running Processes
-2. Analyze Process
-3. Suspend Process
-4. Resume Process
-5. Automatic Prediction Demo
-6. Exit
-
-
-
-## Architecture
-
-Monitor Process
--> Collect Data
--> Predict Future Usage
--> Decision
--> Suspend
--> Resume
--> Evaluate
-
-
-The prediction module currently uses a weighted scoring prototype rather than a trained ML model. The scoring module can later be replaced by an actual ML model.
-
-Process suspension uses the native Windows `NtSuspendProcess` and `NtResumeProcess` functions dynamically from ntdll.dll.
-
-Some Windows processes may reject access depending on permissions. Do not experiment with system-critical processes.
+Use option 5 for the automatic predictive engine.
+Use option 7 to resume all processes managed/suspended by the framework.
