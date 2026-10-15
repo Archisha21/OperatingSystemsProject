@@ -1,200 +1,22 @@
-#include "process.h"
+#include <stdio.h>
+#include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
-#include <stdio.h>
 #include <string.h>
-
-static ULONGLONG filetime_to_ull(FILETIME ft)
-{
-    ULARGE_INTEGER x;
-    x.LowPart=ft.dwLowDateTime;
-    x.HighPart=ft.dwHighDateTime;
-    return x.QuadPart;
-}
-
-double get_cpu_usage(DWORD pid)
-{
-    HANDLE h;
-    FILETIME create,exit,kernel1,user1,kernel2,user2;
-    ULONGLONG k1,u1,k2,u2;
-    SYSTEM_INFO si;
-    double process_time;
-
-    h=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,FALSE,pid);
-
-    if(!h)
-        return 0.0;
-
-    if(!GetProcessTimes(h,&create,&exit,&kernel1,&user1))
-    {
-        CloseHandle(h);
-        return 0.0;
-    }
-
-    Sleep(1000);
-
-    if(!GetProcessTimes(h,&create,&exit,&kernel2,&user2))
-    {
-        CloseHandle(h);
-        return 0.0;
-    }
-
-    k1=filetime_to_ull(kernel1);
-    u1=filetime_to_ull(user1);
-    k2=filetime_to_ull(kernel2);
-    u2=filetime_to_ull(user2);
-
-    process_time=(double)((k2-k1)+(u2-u1))/10000000.0;
-
-    GetSystemInfo(&si);
-
-    if(si.dwNumberOfProcessors==0)
-        si.dwNumberOfProcessors=1;
-
-    CloseHandle(h);
-
-    return (process_time*100.0)/(1.0*si.dwNumberOfProcessors);
-}
-
-int get_process_info(DWORD pid,ProcessInfo *p)
-{
-    HANDLE h;
-    PROCESS_MEMORY_COUNTERS pmc;
-    FILETIME create,exit,kernel,user;
-    char name[MAX_PATH];
-
-    memset(p,0,sizeof(ProcessInfo));
-
-    p->pid=pid;
-    p->first_seen=GetTickCount64();
-    p->last_active=GetTickCount64();
-
-    h=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,FALSE,pid);
-
-    if(!h)
-        return 0;
-
-    memset(name,0,sizeof(name));
-
-    if(GetModuleBaseNameA(h,NULL,name,sizeof(name)))
-        strncpy(p->name,name,sizeof(p->name)-1);
-    else
-        snprintf(p->name,sizeof(p->name),"PID_%lu",
-                 (unsigned long)pid);
-
-    if(GetProcessMemoryInfo(h,&pmc,sizeof(pmc)))
-    {
-        p->memory_mb=
-            (unsigned long long)pmc.WorkingSetSize/(1024ULL*1024ULL);
-    }
-
-    if(GetProcessTimes(h,&create,&exit,&kernel,&user))
-    {
-        ULONGLONG creation=filetime_to_ull(create);
-        ULONGLONG now=filetime_to_ull((FILETIME){
-            .dwLowDateTime=0,
-            .dwHighDateTime=0
-        });
-
-        (void)creation;
-        (void)now;
-    }
-
-    p->cpu_percent=get_cpu_usage(pid);
-    p->state=1;
-
-    CloseHandle(h);
-
-    return 1;
-}
-
-int get_processes(ProcessInfo list[],int max)
-{
-    HANDLE snapshot;
-    PROCESSENTRY32 entry;
-    int count=0;
-
-    snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
-
-    if(snapshot==INVALID_HANDLE_VALUE)
-        return 0;
-
-    memset(&entry,0,sizeof(entry));
-    entry.dwSize=sizeof(entry);
-
-    if(Process32First(snapshot,&entry))
-    {
-        do
-        {
-            HANDLE h;
-            PROCESS_MEMORY_COUNTERS pmc;
-
-            if(count>=max)
-                break;
-
-            memset(&list[count],0,sizeof(ProcessInfo));
-
-            list[count].pid=entry.th32ProcessID;
-
-            strncpy(list[count].name,
-                    entry.szExeFile,
-                    sizeof(list[count].name)-1);
-
-            list[count].name[sizeof(list[count].name)-1]='\0';
-
-            list[count].state=1;
-            list[count].first_seen=GetTickCount64();
-            list[count].last_active=GetTickCount64();
-
-            h=OpenProcess(
-                PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,
-                FALSE,
-                entry.th32ProcessID
-            );
-
-            if(h)
-            {
-                if(GetProcessMemoryInfo(h,&pmc,sizeof(pmc)))
-                {
-                    list[count].memory_mb=
-                        (unsigned long long)pmc.WorkingSetSize/
-                        (1024ULL*1024ULL);
-                }
-
-                CloseHandle(h);
-            }
-
-            count++;
-
-        }while(Process32Next(snapshot,&entry));
-    }
-
-    CloseHandle(snapshot);
-
-    return count;
-}
-
-int get_battery(void)
-{
-    SYSTEM_POWER_STATUS s;
-
-    if(!GetSystemPowerStatus(&s))
-        return -1;
-
-    if(s.BatteryLifePercent==255)
-        return -1;
-
-    return (int)s.BatteryLifePercent;
-}
-
-const char *process_state(DWORD pid)
-{
-    HANDLE h=OpenProcess(PROCESS_QUERY_INFORMATION,FALSE,pid);
-
-    if(!h)
-        return "UNKNOWN";
-
-    CloseHandle(h);
-
-    return "RUNNING";
-}
+#include "process.h"
+typedef struct { DWORD pid; ULONGLONG cpu_time; ULONGLONG sample_time; } CpuRecord;
+typedef struct { DWORD pid; ULONGLONG background_start; int used; } BackgroundRecord;
+static CpuRecord records[MAX_PROCESSES];
+static int record_count=0;
+static BackgroundRecord background_records[MAX_PROCESSES];
+static ULONGLONG filetime_to_ull(FILETIME ft){ ULARGE_INTEGER u; u.LowPart=ft.dwLowDateTime; u.HighPart=ft.dwHighDateTime; return u.QuadPart; }
+static double calculate_cpu(DWORD pid,ULONGLONG process_time){ int i; ULONGLONG now=GetTickCount64(); double elapsed,cpu; for(i=0;i<record_count;i++){ if(records[i].pid==pid){ elapsed=(double)(now-records[i].sample_time)/1000.0; if(elapsed<=0) return 0; cpu=(double)(process_time-records[i].cpu_time)/10000000.0; cpu=cpu*100.0/elapsed; records[i].cpu_time=process_time; records[i].sample_time=now; if(cpu<0) cpu=0; if(cpu>100) cpu=100; return cpu; }} if(record_count<MAX_PROCESSES){ records[record_count].pid=pid; records[record_count].cpu_time=process_time; records[record_count].sample_time=now; record_count++; } return 0; }
+double get_cpu_usage(DWORD pid){ HANDLE h; FILETIME c,e,k,u; ULONGLONG process_time; h=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,FALSE,pid); if(!h) return 0; if(!GetProcessTimes(h,&c,&e,&k,&u)){ CloseHandle(h); return 0; } process_time=filetime_to_ull(k)+filetime_to_ull(u); CloseHandle(h); return calculate_cpu(pid,process_time); }
+int get_process_info(DWORD pid,ProcessInfo *p){ HANDLE h; PROCESS_MEMORY_COUNTERS pmc; FILETIME c,e,k,u; h=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,FALSE,pid); if(!h) return 0; p->pid=pid; if(!GetModuleBaseNameA(h,NULL,p->name,MAX_PATH)) strcpy(p->name,"Unknown"); p->memory_mb=0; if(GetProcessMemoryInfo(h,&pmc,sizeof(pmc))) p->memory_mb=pmc.WorkingSetSize/(1024*1024); p->cpu_percent=0; if(GetProcessTimes(h,&c,&e,&k,&u)) p->cpu_percent=get_cpu_usage(pid); p->state=1; p->battery=get_battery(); CloseHandle(h); return 1; }
+int get_processes(ProcessInfo list[],int max){ HANDLE snap,h; PROCESSENTRY32 entry; PROCESS_MEMORY_COUNTERS pmc; FILETIME c,e,k,u; ULONGLONG process_time; int count=0; snap=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0); if(snap==INVALID_HANDLE_VALUE) return 0; entry.dwSize=sizeof(entry); if(!Process32First(snap,&entry)){ CloseHandle(snap); return 0; } do{ if(count>=max) break; list[count].pid=entry.th32ProcessID; strncpy(list[count].name,entry.szExeFile,MAX_PATH-1); list[count].name[MAX_PATH-1]='\0'; list[count].cpu_percent=0; list[count].memory_mb=0; list[count].state=1; list[count].usage_count=0; list[count].inactive_seconds=0; list[count].battery=get_battery(); list[count].probability=0; h=OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,FALSE,entry.th32ProcessID); if(h){ if(GetProcessMemoryInfo(h,&pmc,sizeof(pmc))) list[count].memory_mb=pmc.WorkingSetSize/(1024*1024); if(GetProcessTimes(h,&c,&e,&k,&u)){ process_time=filetime_to_ull(k)+filetime_to_ull(u); list[count].cpu_percent=calculate_cpu(entry.th32ProcessID,process_time); } CloseHandle(h); } count++; }while(Process32Next(snap,&entry)); CloseHandle(snap); return count; }
+int get_battery(){ SYSTEM_POWER_STATUS s; if(GetSystemPowerStatus(&s)) return s.BatteryLifePercent; return -1; }
+int get_user_idle_seconds(){ LASTINPUTINFO li; DWORD now; li.cbSize=sizeof(li); if(!GetLastInputInfo(&li)) return 0; now=GetTickCount(); return (int)((now-li.dwTime)/1000); }
+int get_process_age_seconds(DWORD pid){ HANDLE h; FILETIME creation,exit,kernel,user,now_ft; ULARGE_INTEGER ct,now; ULONGLONG age; h=OpenProcess(PROCESS_QUERY_INFORMATION,FALSE,pid); if(!h) return 999999; if(!GetProcessTimes(h,&creation,&exit,&kernel,&user)){ CloseHandle(h); return 999999; } ct.LowPart=creation.dwLowDateTime; ct.HighPart=creation.dwHighDateTime; GetSystemTimeAsFileTime(&now_ft); now.LowPart=now_ft.dwLowDateTime; now.HighPart=now_ft.dwHighDateTime; if(now.QuadPart<ct.QuadPart){ CloseHandle(h); return 0; } age=(now.QuadPart-ct.QuadPart)/10000000ULL; CloseHandle(h); return (int)age; }
+const char *process_state(DWORD pid){ HANDLE h=OpenProcess(PROCESS_QUERY_INFORMATION,FALSE,pid); if(h){ CloseHandle(h); return "RUNNING"; } return "UNKNOWN"; }
+int is_foreground_process(DWORD pid){ HWND hwnd; DWORD foreground_pid=0; hwnd=GetForegroundWindow(); if(!hwnd) return 0; GetWindowThreadProcessId(hwnd,&foreground_pid); return foreground_pid==pid; }
+int get_background_seconds(DWORD pid){ int i; ULONGLONG now=GetTickCount64(); for(i=0;i<MAX_PROCESSES;i++){ if(background_records[i].used && background_records[i].pid==pid){ if(is_foreground_process(pid)){ background_records[i].background_start=now; return 0; } return (int)((now-background_records[i].background_start)/1000); }} for(i=0;i<MAX_PROCESSES;i++){ if(!background_records[i].used){ background_records[i].used=1; background_records[i].pid=pid; background_records[i].background_start=now; return 0; }} return 0; }
