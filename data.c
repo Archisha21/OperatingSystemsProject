@@ -1,80 +1,74 @@
-#include "data.h"
 #include <stdio.h>
-#include <string.h>
+#include "data.h"
 
-typedef struct {
-    DWORD pid;
-    int usage_count;
-    int inactive_seconds;
-} History;
+#define FILE_NAME "usage_history.csv"
 
-#define MAX_HISTORY 1024
-
-static History history[MAX_HISTORY];
-static int history_count=0;
-
-void update_history(ProcessInfo list[],int count)
+void save_usage(ProcessInfo *p)
 {
-    int i,j;
+    FILE *f=fopen(FILE_NAME,"a");
 
-    for(i=0;i<count;i++)
-    {
-        int found=-1;
+    if(!f)
+        return;
 
-        for(j=0;j<history_count;j++)
-        {
-            if(history[j].pid==list[i].pid)
-            {
-                found=j;
-                break;
-            }
-        }
+    fprintf(f,"%lu,%.2f,%llu,%d,%d,%d,%.2f\n",
+            p->pid,
+            p->cpu_percent,
+            (unsigned long long)p->memory_mb,
+            p->inactive_seconds,
+            p->usage_count,
+            p->battery,
+            p->probability);
 
-        if(found==-1 && history_count<MAX_HISTORY)
-        {
-            found=history_count++;
-            history[found].pid=list[i].pid;
-            history[found].usage_count=0;
-            history[found].inactive_seconds=0;
-        }
-
-        if(found>=0)
-        {
-            if(list[i].cpu_percent>1.0)
-                history[found].usage_count++;
-            else
-                history[found].inactive_seconds+=2;
-
-            list[i].usage_count=history[found].usage_count;
-            list[i].inactive_seconds=history[found].inactive_seconds;
-        }
-    }
+    fclose(f);
 }
 
-void save_history(ProcessInfo list[],int count)
+int get_usage_count(DWORD pid)
 {
-    FILE *fp;
-    int i;
+    FILE *f;
+    char line[512];
+    unsigned long id;
+    double cpu;
+    int count=0;
 
-    fp=fopen("process_history.csv","w");
-    if(!fp) return;
+    f=fopen(FILE_NAME,"r");
 
-    fprintf(fp,"pid,name,usage_count,inactive_seconds,cpu_percent,"
-               "memory_mb,battery,probability,decision\n");
+    if(!f)
+        return 0;
 
-    for(i=0;i<count;i++)
+    while(fgets(line,sizeof(line),f))
     {
-        fprintf(fp,"%lu,%s,%d,%d,%.2f,%llu,%d,%.3f,%s\n",
-                (unsigned long)list[i].pid,
-                list[i].name,
-                list[i].usage_count,
-                list[i].inactive_seconds,
-                list[i].cpu_percent,
-                (unsigned long long)list[i].memory_mb,
-                list[i].battery,
-                list[i].probability,
-                list[i].probability>=0.40?"KEEP":"SUSPEND");
+        cpu=0;
+
+        if(sscanf(line,"%lu,%lf",&id,&cpu)==2 && id==pid)
+        {
+            if(cpu>=1.0)
+                count++;
+        }
     }
 
-    fclose(fp);
+    fclose(f);
+
+    return count;
+}
+
+void show_usage_history()
+{
+    FILE *f;
+    char line[512];
+
+    f=fopen(FILE_NAME,"r");
+
+    if(!f)
+    {
+        printf("\nNo usage history available.\n");
+        return;
+    }
+
+    printf("\nUSAGE HISTORY\n");
+    printf("-------------------------------------------------------------------------------\n");
+
+    while(fgets(line,sizeof(line),f))
+        printf("%s",line);
+
+    fclose(f);
 }
