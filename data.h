@@ -3,7 +3,8 @@
 
 #include "process.h"
 
-void update_history(ProcessInfo list[],int count);
-void save_history(ProcessInfo list[],int count);
+void save_usage(ProcessInfo *p);
+int get_usage_count(DWORD pid);
+void show_usage_history();
 
 #endif
